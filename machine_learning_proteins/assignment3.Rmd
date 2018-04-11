@@ -1,0 +1,574 @@
+---
+title: "Statistics with R - Assignment 3"
+author: "Alberto Gil"
+date: "June 2, 2017"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+```{r results='hide', message=FALSE, warning=FALSE,echo=FALSE}
+# Load the required libraries
+library(broom)
+library(knitr)
+library(class) # for knn() function
+library(randomForest) # for randomForest() package
+library(e1071) # for naiveBayes() function
+library(caret) # 
+library(ggplot2)
+library(gplots) # for doing the heatmaps
+
+```
+
+
+## 1. Predicting protein location
+
+A) The datasets were imported from the provided files, for both the E-coli and yeast datasets. As described in the paper from Horton et al., there were 12 repeated sequences in the yeast dataset (1484 samples), and thus they were deleted in the code to avoid redundancy, yielding 1462 samples.
+
+```{r}
+ecolidataset <- read.table('data/ecoli.data',header=TRUE,sep="",
+                           comment.char = "#", row.names=1)
+yeastdataset <- read.table('data/yeast.data',header=TRUE,sep="",
+                           comment.char = "#")
+yeastdataset <- yeastdataset[unique(yeastdataset[,1]),] # remove duplicated rows
+
+# Retrieve training dataframes 
+ecoli.train <- subset(ecolidataset, select = -c(location))
+yeast.train <- subset(yeastdataset, select = -c(SpAccNr,location))
+
+# Retrieve the labels from the dataset
+ecoli.labels <- as.list(subset(ecolidataset,select = c(location)))$location
+yeast.labels <- as.list(subset(yeastdataset,select = c(location)))$location
+```
+
+A k-NN, Random Forest and naïve Bayes classifiers were trained. Its performance was evaluated by using stratified cross-validation. Stratified cross-validation was chosen in order to avoid imbalances in the distribution of the target classes for every fold. 4 folds and 10 folds were used respectively for the E. coli and Yeast datasets. 
+
+```{r}
+# INPUT p: required number of partitions 
+#       f: list of one or more factors to stratify over
+# OUTPUT integer vectorcontaining partition labels (1 .. p).
+partition <- function(p, f) {
+  if (is.atomic(f)) {
+    lenf <- length(f)
+  } else {
+    lenf < length(f[[1]])
+  }
+  part <- vector(mode="integer", length=lenf)
+  tapply(X=1:length(part), INDEX=f, FUN=function(i) {
+    part[i] <<- as.integer((sample(1:length(i)) + sample(1:p,1))%%p + 1)
+  }
+  )
+  return(part)
+}
+
+# Crossvalidates a selected model with k-fold stratified cross
+# validation, and report the model performance
+# INPUT: model: 'knn', 'RF' or'naive'
+#        train: training set dataframe
+#        labels: list of labels (target variable) of training set
+#        npart: number of partitions of dataframe
+#        modelsperformance: Dataframe for storing performance of previous models (values
+#                         will be added in a new column)
+#       (optional) k: k parameter for k-NN model
+#       (optional) print_mean: Boolean; set to yes if mean and sd are desired to be in the final dataframe
+# OUTPUT: modelsperformance (dataframe containing performance of the models )
+crossvalidate_model <- function(model,train,trainlabels,npart,
+                                models_performance,k=1,print_mean=FALSE){
+  set.seed(2) # Set a seed for generating random numbers
+  part <- partition(npart,trainlabels)
+  if (is.null(models_performance)){
+    # Create a new dataframe for storing model performance
+    models_performance <- data.frame(partition = min(part):max(part))
+  }
+  for (i in min(part):max(part)){
+    if (model == 'knn'){
+      set.seed(2)
+      predictions <- knn(train[part != i,],train[part == i,],
+                         trainlabels[part != i],k)
+    }
+    if (model == 'RF'){
+      set.seed(2)
+      rf <- randomForest(x=train[part != i,], y=trainlabels[part != i],
+                         proximity=TRUE,importance=TRUE)
+      predictions <- predict(rf, train[part == i,])
+    }
+    if (model == 'naive'){
+      nb <- naiveBayes(x=train[part != i,], y=trainlabels[part != i])
+      predictions <- predict(nb, train[part == i,])
+    }
+    # Calculate the error (mean number of misclassifications)
+    error <- mean(predictions != trainlabels[part == i])
+    models_performance[i,model] <- error
+  }
+   # If desired by the used, print the mean performance in the df 
+  if(print_mean){
+    g <- as.data.frame(lapply(models_performance,mean))
+    g[1,1] <- 'mean'
+    h <- as.data.frame(lapply(models_performance,sd))
+    h[1,1] <- 'sd'
+    models_performance[length(rownames(models_performance))+1,] <- g
+    models_performance[length(rownames(models_performance))+1,] <- h
+  }
+  return(models_performance)
+}
+
+# Retrive the performance from different models
+ecoli_performance <- crossvalidate_model('knn',ecoli.train,ecoli.labels,4,NULL,7)
+ecoli_performance <- crossvalidate_model('RF',ecoli.train,ecoli.labels,4,
+                                         ecoli_performance)
+ecoli_performance <- crossvalidate_model('naive',ecoli.train,ecoli.labels,4,
+                                         ecoli_performance,7,TRUE)
+yeast_performance <- crossvalidate_model('knn',yeast.train,yeast.labels,10,NULL,21)
+yeast_performance <- crossvalidate_model('RF',yeast.train,yeast.labels,10,
+                                         yeast_performance)
+yeast_performance <- crossvalidate_model('naive',ecoli.train,yeast.labels,10,
+                                         yeast_performance,7,TRUE)
+```
+
+We can observe how for the E. Coli dataset the mean error of the models is lower for the k-NN classifier, followed by the Random Forest. Lastly, the naïve Bayes classifier reports the higher mean error.
+```{r,echo=FALSE}
+kable(ecoli_performance)
+```
+
+In the case of the yeast dataset, the performance of the trained models is much lower for all the cases, due to reporting a higher mean error in all cases. We can observe how the Naive Bayes classifier is the one which performs much worse than Random Forest and k-NN classifiers. In the latter section it will be tested wether the difference in performances of the models is statistically significant.
+
+```{r,echo=FALSE}
+kable(yeast_performance)
+```
+
+C) In order to obtain the distribution over the class predictions, for every model different parameters can be set in their corresponding functions, and can enable to obtain such distributions. In the case of knn classifier, by setting prob=TRUE in the knn() function, we obtain the probability calculated as the proportion of the votes from the k neighbours for the winning class. Therefore, this setting only enables to obtain the distribution as a binary classification problem, as it yields the probability of being from the majority class vs being from the other classes. For instance, in the following table (showing 5 samples predictions) we can observe how the probability of the sample 1 belonging to class "cp" is 1 according to the model. Nevertheless, for sample 2 the probability of belonging to class "pp" is 0.71. This means that there is a 0.29 probability of that sample to belong to the other classes, but we cannot discern between them.
+```{r,echo=FALSE}
+i <- 1
+part <- partition(4,ecoli.labels)
+test <- knn(ecolidataset[part != i,-8],ecolidataset[part == i,-8],
+                        ecolidataset[part != i,8],k=7,prob=TRUE)
+```
+
+```{r,echo=FALSE}
+t <- as.data.frame(test[1:5])
+t[2] <- attributes(test)$prob[1:5]
+colnames(t) <- c('winning class','proportion of votes for winning class')
+kable(t)
+```
+
+For Naïve Bayes, due to its probabilistic approach it is more straightforward to obtain the probability of belonging to a certain class according to the model. If we set type="raw" in the predict() function by giving as an input a naiveBayes model, we can obtain the probability of every sample to belonging to a cetain class. In fact, the decision rule of the naïve Bayes model will predict the class of the sample as the one with the highest probability. In the following table (showing 5 samples predictions), we can observe how the probability of the sample belonging to every class is reported. We need to be careful in multiclass classification when using this approach, as if one of the classes in the dataset is only present in one sample, this will yield a table only containing "NA".
+
+```{r,echo=FALSE}
+nb <- naiveBayes(x=ecoli.train, y=ecoli.labels)
+```
+
+```{r}
+predictions_nb <- predict(nb, ecoli.train[part == i,],type="raw")
+```
+
+```{r,echo=FALSE}
+kable(predict(nb, ecoli.train[part == i,],type="raw")[1:5,])
+```
+
+Lastly, for a Random Forest model a similar approach can be done, by setting type="prob" in the predict() function when giving a Random Forest model as input model. Analogous to the prediction table of naïve Bayes, we can observe for every sample the probability of belonging to every class of the training set.
+```{r,echo=FALSE}
+load("rf_test.RData")
+i <- 1
+```
+
+```{r}
+pred_randomForest <- predict(rf_test, ecolidataset[part == i,-8], type = "prob")
+```
+
+```{r,echo=FALSE}
+kable(pred_randomForest[1:5,])
+```
+
+
+C) The naïve assumption of the Naïve Bayes classifier is that all the attributes of the dataset are independent between them, given the class of the example, simplifying the estimation of the probability classifier. In order to check whether the assumption is hold on the dataset, correlations between the variables could be estimated. If there is a significant correlation between variables, this means that variables have a certain interaction between them and thus they are not independent between them. 
+<br>In the case of the E. coli dataset, we can check whether the variables are linearly correlated by estimating the Pearson correlation between all variables. Furthermore, we can also check by estimating the Spearman correlation between all variables whether there is any monotonic relationship between all variables, either linear or not. In the heatmap obtained using Pearson correlation we can check how there is a strong positive correlation between variables "alm1" and "alm2". A linear positive correlation between "gvh" and "mcg", and between "alm1" and "mcg" variables, can also be observed (value close to +0.5). For the other variables only weak correlations are observed. Nevertheless, if we check the Spearman correlation between all variables, new non-linear correlations are observed in the dataset. For instance, positive correlations between "alm1" and "aac", "aac" and "mcg", and other correlations are observed.
+<br>This suggests that the naïve assumption is not likely to be satisfied in the E. coli dataset.
+
+
+```{r,fig.cap="<b>Figure 1</b>. Heatmap of the Pearson (top) and Spearman (bottom) correlation between all variables of the E-Coli dataset",echo=FALSE}
+# Load the datasets
+
+ecolidataset <- read.table('data/ecoli.data',header=TRUE,sep="",
+                           comment.char = "#", row.names=1)
+yeastdataset <- read.table('data/yeast.data',header=TRUE,sep="",
+                           comment.char = "#")
+
+# Retrieve the labels from the dataset
+ecoli.labels <- as.list(subset(ecolidataset,select = c(location)))$location
+ecoli.train <- subset(ecolidataset, select = -c(location))
+ecoli.train <- data.frame(apply(ecoli.train, 2, function(x) as.numeric(as.character(x))))
+pears_cor <- cor(ecoli.train,method="pearson")
+spear_cor <- cor(ecoli.train,method="spearman")
+hmcol <- colorRampPalette(c("red", "white","blue"))
+heatmap.2(pears_cor,col = hmcol,main="Pearson correlation")
+heatmap.2(spear_cor,col = hmcol,main="Spearman correlation")
+
+```
+
+In the case of the yeast dataset, again we can observe strong linear correlations in the dataset. This is the case of "mcg" and "gvh", which are strongly positive correlated, and "alm" and "gvh", which are negatively correlated. Other correlations can also be observed in the heatmap. When the Spearman correlation between variables is studied in the dataset, the similar correlations that the ones observed in the heatmap of Pearson correlation are observed. 
+<br>Again, this may suggest that the naïve assumption is not satisfied in this dataset.
+
+```{r,fig.cap="<b>Figure 2</b>. Heatmap of the Pearson (top) and Spearman (bottom) correlation between all variables of the Yeast dataset",echo=FALSE}
+yeastdataset <- yeastdataset[unique(yeastdataset[,1]),]
+yeast.labels <- as.list(subset(yeastdataset,select = c(location)))$location
+yeast.train <- subset(yeastdataset, select = -c(SpAccNr,location))
+pears_cor <- cor(yeast.train,method="pearson")
+spear_cor <- cor(yeast.train,method="spearman")
+hmcol <- colorRampPalette(c("red", "white","blue"))
+heatmap.2(pears_cor,col = hmcol,main="Pearson correlation")
+heatmap.2(spear_cor,col = hmcol,main="Spearman correlation")
+```
+
+We need to take into account that the higher the number of variables pairs we check, the higher the chances are that there is a random correlation between them. Given that our datasets doesn't suffer from curse of dimensionality (number of samples is 48 times bigger than the number of features for the E-coli dataset, and 186 times bigger for the yeast dataset), this chance is low.
+
+D) In order to check whether the differences in prediction accuracy of the three methods are significant, a paired t-test between the misclassifications of every model in every fold (using pairwise comparison), was used. For doing so, a 95% confidence level of the interval was set, and the null-hypothesis (H0) was defined as mean of misclassifications between each pair of models are the same. The alternative hypothesis (H1) was defined as the mean of misclassifications between each pair of models are different.
+<br>If we perform this statistical test between all pair of models used for the E. Coli dataset, we can observe how for all the three model comparisons the null-hypothesis cannot be rejected, due to in all cases the difference between means of performances falls at 0 with a 95% confidence interval of the difference between mean of misclassifications, and so the reported p-values are extremely high.
+
+```{r,echo=FALSE}
+partition <- function(p, f) {
+  if (is.atomic(f)) {
+    lenf <- length(f)
+  } else {
+    lenf < length(f[[1]])
+  }
+  part <- vector(mode="integer", length=lenf)
+  tapply(X=1:length(part), INDEX=f, FUN=function(i) {
+    part[i] <<- as.integer((sample(1:length(i)) + sample(1:p,1))%%p + 1)
+  }
+  )
+  return(part)
+}
+
+# model: 'knn', 'RF' of 'naive'
+# modelsperformance: Dataframe for storing performance of models
+crossvalidate_model <- function(model,train,trainlabels,npart,
+                                models_performance,k){
+  set.seed(2)
+  part <- partition(npart,trainlabels)
+  if (is.null(models_performance)){
+    models_performance <- data.frame(partition = min(part):max(part))
+  }
+  for (i in min(part):max(part)){
+    if (model == 'knn'){
+      set.seed(2)
+      predictions <- knn(train[part != i,],train[part == i,],
+                         trainlabels[part != i],k)
+    }
+    if (model == 'RF'){
+      set.seed(2)
+      rf <- randomForest(x=train[part != i,], y=trainlabels[part != i],
+                         proximity=TRUE,importance=TRUE)
+      predictions <- predict(rf, train[part == i,])
+    }
+    if (model == 'naive'){
+      nb <- naiveBayes(x=train[part != i,], y=trainlabels[part != i])
+      predictions <- predict(nb, train[part == i,])
+    }
+    cf <- confusionMatrix(predictions, trainlabels[part == i])
+    accuracy <- cf$overall['Accuracy']
+    error <- sum(predictions != trainlabels[part == i])
+    #models_performance[i,model] <- accuracy
+    models_performance[i,model] <- error
+  }
+  return(models_performance)
+}
+
+# Load the datasets
+
+ecolidataset <- read.table('data/ecoli.data',header=TRUE,sep="",
+                           comment.char = "#", row.names=1)
+yeastdataset <- read.table('data/yeast.data',header=TRUE,sep="",
+                           comment.char = "#")
+
+# Retrieve the labels from the dataset
+ecoli.labels <- as.list(subset(ecolidataset,select = c(location)))$location
+ecoli.train <- subset(ecolidataset, select = -c(location))
+
+ecoli_performance <- crossvalidate_model('knn',ecoli.train,ecoli.labels,4,NULL,7)
+ecoli_performance <- crossvalidate_model('RF',ecoli.train,ecoli.labels,4,
+                                         ecoli_performance)
+ecoli_performance <- crossvalidate_model('naive',ecoli.train,ecoli.labels,4,
+                                         ecoli_performance)
+yeast_performance <- crossvalidate_model('knn',yeast.train,yeast.labels,10,NULL,21)
+yeast_performance <- crossvalidate_model('RF',yeast.train,yeast.labels,10,
+                                         yeast_performance)
+yeast_performance <- crossvalidate_model('naive',ecoli.train,yeast.labels,10,
+                                         yeast_performance,7)
+```
+
+
+```{r,echo=FALSE}
+aa <- t.test(as.list(ecoli_performance['knn'])$knn,
+       as.list(ecoli_performance['RF'])$RF, paired=TRUE,conf.level=0.95)
+bb <- t.test(as.list(ecoli_performance['knn'])$knn,
+       as.list(ecoli_performance['naive'])$'naive', paired=TRUE,conf.level=0.95)
+cc <- t.test(as.list(ecoli_performance['RF'])$RF,
+       as.list(ecoli_performance['naive'])$'naive', paired=TRUE,conf.level=0.95)
+results_test <- data.frame('model1' = c('knn','knn','Random Forest'))
+#results_test['model1'] <- c('knn','knn','Random Forest')
+results_test['model2'] <- c('Random Forest','naive Bayes','naive Bayes')
+results_test['p-value'] <- c(aa$p.value,bb$p.value,cc$p.value)
+results_test['t'] <- c(signif(as.numeric(levels(as.factor(aa$statistic[1]))[1],digits=4)),                     signif(as.numeric(levels(as.factor(bb$statistic[1]))[1],digits=4)),               signif(as.numeric(levels(as.factor(cc$statistic[1]))[1],digits=4)))
+results_test['95% C.I (left)'] <-c(aa$conf.int[1],bb$conf.int[1],cc$conf.int[1])
+results_test['95% C.I (right)'] <-c(aa$conf.int[2],bb$conf.int[2],cc$conf.int[2])
+kable(results_test)
+```
+
+In the case of the models built from the Yeast dataset, the same approach was followed. In this case, we can observe how for the three comparisons the null hypothesis can be rejected with a high significance (in all cases the p-value<0.0001). This means that the performance of the models are statistically significant, due to the difference between means doesn't fall at 0 value with a 95% confidence interval, and thus (given the results reported in the first section), we can affirm that the random forest built from the yeast dataset is significantly better than the other models tested. 
+
+```{r,echo=FALSE}
+aa <- t.test(as.list(yeast_performance['knn'])$knn,
+       as.list(yeast_performance['RF'])$RF, paired=TRUE,conf.level=0.95)
+bb <- t.test(as.list(yeast_performance['knn'])$knn,
+       as.list(yeast_performance['naive'])$'naive', paired=TRUE,conf.level=0.95)
+cc <- t.test(as.list(yeast_performance['RF'])$RF,
+       as.list(yeast_performance['naive'])$'naive', paired=TRUE,conf.level=0.95)
+results_test <- data.frame('model1' = c('knn','knn','Random Forest'))
+#results_test['model1'] <- c('knn','knn','Random Forest')
+results_test['model2'] <- c('Random Forest','naive Bayes','naive Bayes')
+results_test['p-value'] <- c(format(aa$p.value,scientific=TRUE),format(bb$p.value,scientific=TRUE),format(cc$p.value,scientific=TRUE))
+results_test['t'] <- c(signif(as.numeric(levels(as.factor(aa$statistic[1]))[1],digits=4)),                     signif(as.numeric(levels(as.factor(bb$statistic[1]))[1],digits=4)),               signif(as.numeric(levels(as.factor(cc$statistic[1]))[1],digits=4)))
+results_test['95% C.I (left)'] <-c(aa$conf.int[1],bb$conf.int[1],cc$conf.int[1])
+results_test['95% C.I (right)'] <-c(aa$conf.int[2],bb$conf.int[2],cc$conf.int[2])
+kable(results_test)
+```
+
+A last remark done from these results is that, as reported in the paper from Horton et al., the two main assumptions of this statistical test (the difference of the performance is normally distributed and the performance difference on different test partitions of the crossvalidation approach are independent) may not be satisfied. This can have consequences in the interpretations done in this section.
+
+## 2. Detecting heavy metal pollution from gene expression in Folsomia
+
+A) A hierarchical tree of the whole dataset was built by using Pearson correlation between samples as a distance function. We can observe how the samples treated with the different heavy metals doesn't seem to cluster together within their corresponding tested metal, except for a few cases, like Cr. The control samples (LUFA) are also disperse along the tree.
+
+```{r,echo=FALSE}
+# fcc... : gene labels (1st column)
+# subsequent columns: activity of those genes 
+# Read the datasets files (¿¿¿¿use read.delim?????)
+soildataset <- read.table('heavy_metal_data/Log2GR31_Q_Ave_DM.txt',header=TRUE,sep="",
+                           comment.char = "#", row.names=1)
+soildataset.samplesinfo <- read.table('heavy_metal_data/Samples.txt',header=TRUE,sep="",
+                                      comment.char = "#",fill = TRUE)
+# Retrieve only the information from the metal on the sample
+soildataset.samplesinfo <- soildataset.samplesinfo$metal 
+soildataset <- soildataset[-1,] # Delete first row
+#ntransposed <- data.matrix(soildataset)
+#soildataset <- t(data.matrix(soildataset))
+
+# Convert the dataframe to numeric (will avoid further problems in randomForest() func.)
+df2 <- data.frame(apply(soildataset, 2, function(x) as.numeric(as.character(x))))
+rownames(df2) <- rownames(soildataset)
+
+createhierarchicaltree <- function(dmatrix,labels,title=NULL){
+  clusters <- hclust(dmatrix,method="complete")
+  dend <- as.dendrogram(clusters)
+  mycol <- rainbow(length(unique(soildataset.samplesinfo)))
+  samplenum <- as.numeric(soildataset.samplesinfo[order.dendrogram(dend)])
+  leafcolor <- function(node) {
+    if (is.leaf(node)) {
+      # The <<- operator must be used instead of <- so that this function searches outside its own environment for the globally defined i.
+      i <<- i + 1
+      attr(node, "nodePar") <- list(pch=20, cex=1.5, col=mycol[samplenum[i]] )
+    }
+    return(node)
+  }
+  i <- 0
+  dend <- dendrapply(dend, leafcolor)
+  plot(dend, leaflab="none", axes=FALSE,main=title)
+  legend("topright",labels, pch=19, col=mycol,cex=0.5)
+}
+
+```
+
+
+```{r,fig.cap="<b>Figure 3</b>. Hierarchical clustering of the dataset using Pearson correlation as a distance function",warning=FALSE,echo=FALSE}
+createhierarchicaltree(as.dist(1-cor(df2,method="pearson")),
+                       levels(soildataset.samplesinfo),
+                       'Distance function: Pearon correlation')
+```
+
+On the other hand, if the same tree is built by using Spearman correlation as a distance function, the samples appear to cluster close to their corresponding metal. Nevertheless, some discrepancies along the tree can be observed, specially for the control group (LUFA), which is still disperse along the tree. 
+
+```{r,fig.cap="<b>Figure 4</b>. Hierarchical clustering of the dataset using Pearson correlation as a distance function",echo=FALSE}
+createhierarchicaltree(as.dist(1-cor(df2,method="spearman")),
+                       levels(soildataset.samplesinfo),
+                       'Distance function: Spearman correlation')
+```
+
+This means that even within the same class the variables show different overall correlations for that samples. Nevertheless, a model like a Random Forest may be able to classify the samples, not based only on the overall patterns of the variables but by learning decision rules from every different variable. This will be studied in the further sections.
+
+B) The dataset was split into an unknown set (including samples Noy and PLO) and the rest of the set was used as training set, which contained samples in which different heavy metals were tested. The control samples (LUF and OC) were treated as the same group (LUFA), whereas fo the samples treated with different metal each sample was labelled according to the name of the metal, without taking into account the concentration added. The original dataset can be easily separated as follows:
+
+```{r}
+# Read the original files
+soildataset <- read.table('heavy_metal_data/Log2GR31_Q_Ave_DM.txt',header=TRUE,sep="",
+                           comment.char = "#", row.names=1)
+soildataset.samplesinfo <- read.table('heavy_metal_data/Samples.txt',header=TRUE,
+                                      sep="",comment.char = "#",fill = TRUE)
+# Retrieve only the information from the metal on the sample
+soildataset.samplesinfo <- soildataset.samplesinfo$metal 
+soildataset <- soildataset[-1,] # Delete first row
+# Convert the dataframe to numeric (will avoid further problems in randomForest())
+df2 <- data.frame(apply(soildataset, 2, function(x) as.numeric(as.character(x))))
+rownames(df2) <- rownames(soildataset)
+# Transpose the dffor having samples in rows, and genes (features) in columns
+df2 <- t(df2)
+# Retrieve rows with unlabelled data and create a new df with this data 
+unlabeled_data_rows <- as.logical((soildataset.samplesinfo == 'Noy') +
+                                    (soildataset.samplesinfo == 'PLO' ))
+unlabeled_data <- df2[unlabeled_data_rows,]
+# Delete rows with unlabelled data from original dataframe
+soildataset <- df2[unlabeled_data_rows == FALSE,]
+```
+
+C) In order to test the parameters of the random forest that yields the better predictions in our training set, different values for the ntree and mtry parameters. For doing so, mtry was set to its default value and the OOB error from random forests based on different number of trees was estimated. In Figure 5 the OOB error rate is represented as a function of the number of trees used in the random forest. The minimum reported OBB error in the previous plot was 0.3454545, and 1086 different "ntree" chosen scored this error. We can observe how the out-of-bag error decreases as a the number of trees increases, until it starts to increase and have strong oscillations when it reaches approximately 500 number of trees used. Then, it stabilizes and reaches again a minima around 4000 number of trees, showing an stable pattern. We can assure that the model is stable around that number of trees because its predictions error doesn't have big changes after that number of trees. A higher number of trees than 4000 reports a higher OOB error. For this reason, a value of 4010 for the ntree parameter was chosen.
+<br>This observed pattern is the one that was expected, as the higher the number of decision trees used for training a random forest, the better the model generalizes the patterns of the dataset. Nevertheless, once the variance of the model has been stabilized, with higher number of trees than the optimal one the performance is not significantly increase but the computational cost increases.
+
+
+```{r,fig.cap="<b>Figure 5</b>. Representation of the OOB error vs the number of trees used in a random forest, by using mtry default parameter",message=FALSE, warning=FALSE,echo=FALSE}
+# Train a random forest with maximumg 20.000 number of trees, and default mtry parameter
+set.seed(2)
+#rf <- randomForest(x=soildataset, 
+#                   y=droplevels(as.factor(soildataset.samplesinfo[unlabeled_data_rows == FALSE])),
+#                   importance=TRUE,proximity=TRUE,ntree=15000)
+load("rf_ooberror.RData")
+# Retrieve the OOB error rate per number of trees used in the forest
+ooberror <- rf$err.rate[,1]
+
+```
+
+```{r,echo=FALSE,message=FALSE, warning=FALSE,echo=FALSE}
+# Plot the OOB error vs number of trees used
+plot(ooberror,pch=19,cex=0.05,xlab="Number of Trees",ylab="OOB error",type="lines")
+minerror_ntrees <- which(ooberror == min(ooberror))
+```
+
+Once identified the optimal "ntree" parameter (4010), the mtry parameter was tuned by using the tuneRF() function. As can be seen, the lowest OOB error is obtained when mtry is set to 5069, reporting a 21.82% OOB error. This means that the number of variables randomly sampled as candidates at each split will be all the variables from the dataset, as the dataset contained 5069 features. 
+
+```{r eval=FALSE,message=FALSE, warning=FALSE}
+# Tune the mtry parameter
+set.seed(2)
+tuned <- tuneRF(x=soildataset,
+                y=droplevels(as.factor(soildataset.samplesinfo[unlabeled_data_rows == FALSE])),mtryStart = 1,ntreeTry = 4010,stepFactor=20,plot=TRUE)
+```
+
+```{r,echo=FALSE}
+load("tuned.RData")
+kable(tuned)
+```
+
+D) Once selected the parameters (ntrees=4010, mtry = 5069), a random forest was trained. A hierarchical tree was built by using as a distance matrix the similarity matrix for the samples estimated from the number of times that in the classification trees from the random forest the samples were at the same leaf. We can observe how certain group of samples are extremely well clustered in the tree by clustering using this distance matrix (classes Cd, LUFA, Cr and Co) whereas for certain metal classes (Ba, and specially Pb, Zn) the samples are not clustered together. This is an indicator of the strenght of the random forest towards the classification of certain classes. Whereas for the first classes the model is able to detect the different patterns between the samples, for the last mentioned classes the model is not able to distingish between them, and has a lower power to classify samples from these metal classes. 
+
+```{r,fig.cap="<b>Figure 6</b>. Hierarchical tree of the samples using the proximity matrix obtained from the Random Forest trained on the dataset",echo=FALSE}
+load("finalmodel_randomforest.RData")
+dmatrix <- as.dist(1-final_rf$proximity)
+clusters <- hclust(dmatrix,method="complete")
+dend <- as.dendrogram(clusters)
+labels <- droplevels(as.factor(soildataset.samplesinfo[unlabeled_data_rows == FALSE]))
+mycol <- rainbow(length(unique(labels)))
+samplenum <- as.numeric(labels[order.dendrogram(dend)])
+leafcolor <- function(node) {
+  if (is.leaf(node)) {
+    # The <<- operator must be used instead of <- so that this function searches outside its own environment for the globally defined i.
+    i <<- i + 1
+    attr(node, "nodePar") <- list(pch=20, cex=1.5, col=mycol[samplenum[i]] )
+  }
+  return(node)
+}
+i <- 0
+dend <- dendrapply(dend, leafcolor)
+plot(dend, leaflab="none", axes=FALSE)
+legend("topright", levels(labels),
+       pch=19, col=mycol,cex=0.4)
+```
+
+These observations may be an estimation of how well performs the model. These estimations can be also assessed by checking the confusion matrix of the training set used for the model. Despite this table cannot be used for assessing an unbiased estimation of the error rate of the Random Forest, it can be used for having an overview of which classes are most difficulty classified by the model. We can observe how the most difficultly predicted pollution classes are Pb and Zn, showing how weak is the classifier able to predict those classes even for the training set.
+
+
+```{r,echo=FALSE}
+load("finalmodel_randomforest.RData")
+kable(final_rf$confusion)
+```
+
+The overall performance of the model can be assessed by the OOB error, which was 22%. This is an unbiased error rate of the performance of the model, and so is a clear indicator of the model performance.
+
+E) A variable importance plot was built from the random forest, attached in Figure 7. These plots represent the variance measured as the decrease in the mean accuracy of the model when the variable is permuted (MeanDecreaseAccuracy) and by the average decrease of gini purity by splits when the variable is permuted (MeanDecreaseGini). Therefore, the most useful variables in the model are the ones that have higher values in these decreases, giving them more power to classify the samples.
+<br>In both cases the 7 most important variables are the same independent of the measure of importance used, therefore they are the most discriminative variable between the different pollution classes. 
+  
+```{r,fig.cap="<b>Figure 7</b>. Derived variable importance from the random forest in terms of Mean decrease accuracy (left) and Mean decrease Gini (right) ",echo=FALSE}
+varImpPlot(final_rf,cex=0.4,main=NULL)
+```
+
+F) If we use the Mean Decrease Accuracy (MDA) as the importance measure, the 20 most important genes for pollution prediction are the following ones:
+
+```{r,echo=FALSE}
+genes_importance_sorted = sort(rf$importance[,8],decreasing=TRUE)
+top20_genes = genes_importance_sorted[1:20]
+MDA <- top20_genes
+MDA <- as.data.frame(MDA)
+kable(MDA)
+```
+
+G) By using the trained Random Forest, the Noy and PLO samples classes were predicted, summarized as follows:
+
+```{r,echo=FALSE,warning=FALSE}
+#predictions_unlabeled_data <- predict(final_rf, unlabeled_data)
+#m <- as.data.frame(predictions_unlabeled_data)
+#colnames(m) <- 'Prediction'
+#kable(m)
+Sample <- c('Noy','Noy.1','Noy.2','PLO','PLO.1','PLO.2','PLO.3')
+Prediction <- c('Co','Cd','LUFA','Co','Co','Co','Co')
+df = data.frame(Sample, Prediction) 
+kable(df)
+```
+
+For interpreting these predictiongs, we need to bear in mind that the model showed a 22% OOB error, and that certain classes are more difficul to be predicted by the model. 
+<br>In the case of PLO, for all 4 samples we obtain "Co" as the predicted pollution class of the sample. Given that "Co" was a class correctly predicted in all samples from the training set, as well as that the "Co" samples clustered together when using the similarity matrix derived from the model, this prediction is highly probable to be correclty predicted.
+<br> On the other hand, for the prediction from Noy samples there is a high dispersion on the predictions that suggest that we shouldn't trust them a lot. Clearly, all the three Noy samples have a different predicted class. Among these predicted classes, there is one control, and two metals that were easily identificable in the training set (Co, and Cd. see section D). Given this dispersion, I would suggest that either the model is not performing well for this group of samples, or that the samples were not correctly prepared. 
+
+H) For the 10 most important gene activity variables derived by the importance from the Random forest, its power towards the discrimination of the different sample types was evaluated by creating a box plot for every variable. It is clear that for every gene, some pollution classes have a mean value that falls within another interval in comparison with the other pollution classes. For instance, for the "Fcc05902" gene it can be clearly observed how the "Cr" pollution class it is significantly differentiated from the other classes according to the boxplot.
+<br>At the same time, the evaluation of every box plot one by one is a tedious activity that can yield to a complex analysis. Nevertheless, the main characteristic of a Random Forest is that it is capable of learning the patterns and decision rules that give rise to the optimal separation between classes by itself. 
+
+```{r,fig.cap="<b>Figure 8</b>. Boxplots from the pollution dataset for different variable (different plot) and different pollution classes (different colors within the same plot)",echo=FALSE}
+soildataset <- read.table('heavy_metal_data/Log2GR31_Q_Ave_DM.txt',header=TRUE,sep="",
+                           comment.char = "#", row.names=1)
+soildataset.samplesinfo <- read.table('heavy_metal_data/Samples.txt',header=TRUE,sep="",
+                                      comment.char = "#",fill = TRUE)
+# Retrieve only the information from the metal on the sample
+soildataset.samplesinfo <- soildataset.samplesinfo$metal 
+soildataset <- soildataset[-1,] # Delete first row
+df2 <- data.frame(apply(soildataset, 2, function(x) as.numeric(as.character(x))))
+rownames(df2) <- rownames(soildataset)
+df2 <- t(df2)
+soildataset <- df2
+import10 <- rownames(as.data.frame(genes_importance_sorted[1:10]))
+labels_toplot <- droplevels(as.factor(soildataset.samplesinfo))
+i <- 1
+for (var in import10){
+  if (i == 1){
+    #plot.new()
+    par(mfrow=c(2,2))
+  }
+  if (i == 5){
+    #plot.new()
+    par(mfrow=c(2,2))
+  }
+  if (i == 9){
+    #plot.new()
+    par(mfrow=c(1,2))
+  }
+  j <- 1
+  x <- list()
+  # Study distribution of the variables among every metal
+  for (metal in levels(labels_toplot)){
+    t1 <- soildataset[labels_toplot==metal,var]
+    x[[j]] <- t1
+    j <- j + 1
+  }
+  boxplot(x,names=levels(labels_toplot),cex.axis=0.5, cex.names=0.5,
+          col=rainbow(length(levels(labels_toplot))),main=var)
+  i <- i + 1 
+}
+
+
+```
